@@ -120,7 +120,7 @@ This routing remains configurable through the ordinary action bindings. For exam
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
-| `app.interrupt` | `escape` | Cancel / abort |
+| `app.interrupt` | `escape` | Cancel / abort. Press again after a moment to abandon a run that will not stop; that discards any tool call still in flight and any queued messages, which are returned to the editor |
 | `app.clear` | `ctrl+c` | Clear editor (first) / exit (second) |
 | `app.exit` | `ctrl+d` | Exit (when editor empty) |
 | `app.suspend` | `ctrl+z` (none on Windows) | Suspend to background |

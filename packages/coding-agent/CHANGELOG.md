@@ -11,6 +11,9 @@
 
 ### Fixed
 
+- Fixed interrupts being ignored when a provider call, tool, or event handler never settles, which left the session showing `Working...` with no way to cancel or exit the turn. Pressing the interrupt key again after a moment now abandons the run, records the aborted turn and any unanswered tool calls, and returns the session to idle. Queued messages are returned to the editor rather than discarded.
+- Fixed `/new`, `/resume`, `/fork`, `/import`, session switching and the RPC `abort` command hanging forever against a run that ignores the abort signal. They discard the session anyway, so they now abandon such a run instead of waiting for it.
+- Fixed `waitForIdle()` never resolving when an `agent_settled` extension handler does not return, even though the session was already idle. The handlers are now awaited with a timeout instead of indefinitely.
 - Fixed toggling thinking visibility clearing partial output from running Bash tools ([#8611](https://github.com/earendil-works/pi/issues/8611)).
 - Fixed Windows shell aborts crashing Pi when `taskkill.exe` is unavailable on `PATH` ([#6596](https://github.com/earendil-works/pi/issues/6596)).
 - Fixed resumed sessions corrupting the next appended entry when their JSONL file lacks a trailing newline ([#8345](https://github.com/earendil-works/pi/issues/8345)).

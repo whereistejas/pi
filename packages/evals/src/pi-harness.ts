@@ -156,7 +156,7 @@ async function runPiCodingAgent<TOutput extends JsonValue>(
 			if (!transformedSystemPrompt.trim()) throw new Error("Transformed eval system prompt must not be empty.");
 			await evalSession.reload();
 		}
-		let abortPromise: Promise<void> | undefined;
+		let abortPromise: Promise<unknown> | undefined;
 		const abort = () => {
 			abortPromise ??= evalSession.abort();
 		};

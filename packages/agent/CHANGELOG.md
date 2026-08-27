@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Agent.abort({ force: true })`, which abandons a run whose awaited steps ignore the abort signal instead of waiting for it. The closing turn -- an aborted result for every tool call the transcript leaves unanswered, then the assistant turn -- is recorded synchronously and returned, and the agent is idle when the call returns. The abandoned run is detached rather than cancelled: it stops after the turn already in flight, its events are dropped, it takes no further messages from the steering or follow-up queues, and its eventual error is discarded. Queued messages are left in place for the caller to deal with.
+
 ### Fixed
 
 - Fixed Windows `NodeExecutionEnv` aborts crashing when `taskkill.exe` is unavailable on `PATH` ([#6596](https://github.com/earendil-works/pi/issues/6596)).

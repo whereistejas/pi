@@ -167,7 +167,11 @@ export class AgentSessionRuntime {
 	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
 		// Settle any active response first so the aborted turn (including tool
 		// results) is persisted to the outgoing session before it is replaced.
-		await this.session.abort();
+		// Forced, because this session is about to be discarded: waiting politely
+		// on a run that ignores the abort signal would hang `/new`, `/resume`, fork
+		// and import with no way out, which is the same trap the interrupt
+		// escalation exists to escape.
+		await this.session.abort({ force: true });
 		await emitSessionShutdownEvent(this.session.extensionRunner, {
 			type: "session_shutdown",
 			reason,

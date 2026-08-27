@@ -1045,6 +1045,8 @@ pi.on("tool_result", async (event, ctx) => {
 
 Control flow helpers. `ctx.isIdle()` is false while Pi is processing an agent run, automatic retry, auto-compaction retry, or queued continuation.
 
+`ctx.abort()` signals the run and waits for it to unwind. Pass `{ force: true }` to abandon a run that will not unwind on its own; the run is released immediately and its remaining events are dropped, so a handler of your own may stop receiving events for that run. Note that your handlers are awaited inside the run: an `agent_end` or `turn_end` handler that never resolves is itself one of the things that makes a run unstoppable, so give any await in a handler a timeout and pass the signal you are given.
+
 ### ctx.shutdown()
 
 Request a graceful shutdown of pi.

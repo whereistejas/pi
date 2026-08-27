@@ -426,7 +426,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "abort": {
-				await session.abort();
+				// Without `force` this reply never arrives if the run ignores the abort
+				// signal, which leaves the client with no way to recover the session.
+				await session.abort({ force: command.force === true });
 				return success(id, "abort");
 			}
 
