@@ -303,6 +303,17 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 // Constants
 // ============================================================================
 
+/**
+ * How long `agent_settled` extension handlers are awaited before the session
+ * reports itself idle regardless.
+ *
+ * The session is already idle when they are dispatched, so this only decides how
+ * long a caller waiting for idle is willing to be delayed by a handler. Long
+ * enough that a handler doing real work still finishes first, short enough that
+ * one that never returns cannot wedge the session.
+ */
+const AGENT_SETTLED_DISPATCH_TIMEOUT_MS = 2_000;
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -320,6 +331,14 @@ export class AgentSession {
 	private _isAgentRunActive = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
+	/**
+	 * Messages already written to the session file.
+	 *
+	 * Persistence normally happens in the `message_end` listener, but a forced
+	 * abort writes the closing turn ahead of it. This keeps either path from
+	 * appending the same message twice.
+	 */
+	private readonly _persistedMessages = new WeakSet<AgentMessage>();
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -609,7 +628,17 @@ export class AgentSession {
 	private async _emitAgentSettled(): Promise<void> {
 		this._isAgentRunActive = false;
 		try {
-			await this._extensionRunner.emit({ type: "agent_settled" });
+			// Bounded, not skipped. Waiting without a bound let a handler that never
+			// returns hold `waitForIdle()` open forever while `isIdle` already
+			// reported true -- the caller was waiting on a state it had reached.
+			// Not waiting at all is worse: `waitForIdle()` is what teardown uses
+			// before disposing the session, so it would invalidate the extension
+			// runner underneath a handler that was merely slow. The bound lets a slow
+			// handler finish and stops a stuck one from wedging the session.
+			await Promise.race([
+				this._extensionRunner.emit({ type: "agent_settled" }),
+				sleep(AGENT_SETTLED_DISPATCH_TIMEOUT_MS),
+			]);
 			this._emit({ type: "agent_settled" });
 		} finally {
 			this._resolveIdleWaitIfIdle();
@@ -666,7 +695,10 @@ export class AgentSession {
 				event.message.role === "toolResult"
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				if (!this._persistedMessages.has(event.message)) {
+					this._persistedMessages.add(event.message);
+					this.sessionManager.appendMessage(event.message);
+				}
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -1094,6 +1126,35 @@ export class AgentSession {
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
 			await this._emitAgentSettled();
+		}
+	}
+
+	/**
+	 * Persist the closing turn of a run that was abandoned.
+	 *
+	 * Only the abandonment path needs this. A run that ends normally delivers
+	 * `message_end` to this session's listener while the run is still active, and
+	 * the run cannot settle until that listener returns, so persistence always
+	 * precedes idle. An abandoned run is released first and its events are
+	 * delivered out of band afterwards, so without this the user could send the
+	 * next message -- and have it appended -- before a turn that preceded it, and
+	 * a listener that never settles would drop the turn from the file entirely.
+	 *
+	 * The messages come from the abort itself rather than from an index into
+	 * `state.messages`: that array is replaced wholesale by resume, fork,
+	 * compaction and overflow recovery, and an index into it would sooner or later
+	 * designate messages that are already in the file.
+	 */
+	private _persistAbandonedTurn(messages: AgentMessage[]): void {
+		for (const message of messages) {
+			if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") {
+				continue;
+			}
+			if (this._persistedMessages.has(message)) {
+				continue;
+			}
+			this._persistedMessages.add(message);
+			this.sessionManager.appendMessage(message);
 		}
 	}
 
@@ -1595,11 +1656,40 @@ export class AgentSession {
 
 	/**
 	 * Abort current operation and wait for agent to become idle.
+	 *
+	 * `force` abandons a run that will not unwind on its own, so callers that must
+	 * regain an idle session (an interrupt the user repeated, discarding the
+	 * session) are not blocked by a provider call, tool, or event handler that
+	 * ignores the signal.
+	 *
+	 * A forced abort discards queued messages, because the abandoned run will
+	 * never consume them and the next run must not silently inherit them. The
+	 * queued text is returned so a caller with somewhere to put it (the editor)
+	 * can offer it back; anything not read here is gone.
 	 */
-	async abort(): Promise<void> {
+	async abort(options: { force?: boolean } = {}): Promise<{ steering: string[]; followUp: string[] }> {
 		this.abortRetry();
-		this.agent.abort();
+		if (!options.force) {
+			this.agent.abort(options);
+			await this.waitForIdle();
+			return { steering: [], followUp: [] };
+		}
+
+		// Force means stop everything the session is waiting on, not just the agent
+		// run: a compaction or branch summary in flight holds the session non-idle
+		// on its own controller.
+		this.abortCompaction();
+		// Drain the session's own mirrors, not just the agent's queues, or the UI
+		// keeps rendering messages as pending that nothing will ever send.
+		const queued = this.clearQueue();
+		const closingMessages = this.agent.abort(options);
+		this._persistAbandonedTurn(closingMessages);
+		// The abandoned run's `message_end` is delivered out of band and may never
+		// arrive, so the retry counter it would have reset has to be reset here or
+		// the next, unrelated run inherits its remaining attempts.
+		this._retryAttempt = 0;
 		await this.waitForIdle();
+		return queued;
 	}
 
 	async waitForIdle(): Promise<void> {

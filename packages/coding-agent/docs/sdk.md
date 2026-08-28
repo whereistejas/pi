@@ -103,8 +103,12 @@ interface AgentSession {
   compact(customInstructions?: string): Promise<CompactionResult>;
   abortCompaction(): void;
 
-  // Abort current operation
-  abort(): Promise<void>;
+  // Abort current operation. `force` abandons a run that ignores the abort
+  // signal (a provider call that never settles, a handler that never resolves)
+  // instead of waiting for it; the abandoned run keeps running detached.
+  // A forced abort discards queued messages and returns them, so a caller with
+  // an input surface can offer them back; anything not read is gone.
+  abort(options?: { force?: boolean }): Promise<{ steering: string[]; followUp: string[] }>;
 
   // Cleanup
   dispose(): void;

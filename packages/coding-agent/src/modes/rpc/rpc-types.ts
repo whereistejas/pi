@@ -22,7 +22,8 @@ export type RpcCommand =
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
-	| { id?: string; type: "abort" }
+	/** `force` abandons a run that ignores the abort signal instead of waiting for it. */
+	| { id?: string; type: "abort"; force?: boolean }
 	| { id?: string; type: "clear_queue" }
 	| { id?: string; type: "new_session"; parentSession?: string }
 

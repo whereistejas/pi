@@ -322,6 +322,31 @@ agent.abort();           // Cancel current operation
 await agent.waitForIdle(); // Wait for completion
 ```
 
+`abort()` only signals the run's `AbortSignal` and relies on every awaited step
+observing it. A step that does not -- a provider call that never settles, a tool
+or event listener that never resolves -- pins the run, and the agent stays
+streaming with no way back:
+
+```typescript
+agent.abort({ force: true }); // Abandon a run that will not unwind
+```
+
+A forced abort records the closing turn -- an aborted result for every tool call
+the transcript leaves unanswered, then the assistant turn -- and is idle by the
+time it returns. It returns the messages it recorded, so a caller that persists
+the transcript need not wait for listeners, which are notified afterwards and may
+themselves be what would not settle.
+
+The abandoned run is detached, not cancelled. It stops after the turn in flight,
+its events are dropped, it no longer takes messages from the steering or
+follow-up queues, and any error it eventually throws is discarded. The tool or
+provider call already in flight still runs to completion, so `force` is a way to
+get the agent back, not a way to stop work. Queued messages are left untouched:
+the agent has no post-run loop, so what to do with them -- discard them, hand
+them back to the user, run them on the next prompt -- is the caller's decision.
+Prefer a plain `abort()` and reserve `force` for a run that has already failed to
+stop.
+
 ### Events
 
 ```typescript

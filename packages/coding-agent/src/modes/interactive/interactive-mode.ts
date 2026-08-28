@@ -226,6 +226,18 @@ function isCompactionCostNotice(item: RenderSessionItem): item is CompactionCost
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 
+/**
+ * How long after an interrupt a second one escalates to a forced abort.
+ *
+ * A healthy run needs a moment to unwind -- finishing an in-flight tool call,
+ * recording its aborted turn -- and forcing during that window would discard
+ * exactly the work the cooperative path is busy saving. Double-tapping the
+ * interrupt key is common enough that without this it would be the usual way
+ * users hit the forced path. Matches the 500 ms the double-escape and
+ * double-Ctrl+C gestures already use.
+ */
+const FORCE_INTERRUPT_MIN_DELAY_MS = 500;
+
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
 		return false;
@@ -456,6 +468,15 @@ export class InteractiveMode {
 	private readonly defaultWorkingMessage = "Working...";
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
+
+	/**
+	 * When the user interrupted the current run, if it has not settled yet.
+	 *
+	 * A timestamp rather than a flag: escalating to a forced abort requires that
+	 * the run was given a real chance to stop first. See
+	 * `FORCE_INTERRUPT_MIN_DELAY_MS`.
+	 */
+	private interruptRequestedAt: number | undefined;
 
 	private lastSigintTime = 0;
 	private lastEscapeTime = 0;
@@ -2854,7 +2875,26 @@ export class InteractiveMode {
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
 			if (this.session.isStreaming) {
-				this.restoreQueuedMessagesToEditor({ abort: true });
+				const requestedAt = this.interruptRequestedAt;
+				if (requestedAt === undefined) {
+					this.interruptRequestedAt = Date.now();
+					this.restoreQueuedMessagesToEditor({ abort: true });
+					this.showInterruptPending();
+					return;
+				}
+				if (Date.now() - requestedAt >= FORCE_INTERRUPT_MIN_DELAY_MS) {
+					// The run had time to stop and did not. Abandon it so the session
+					// becomes usable again instead of waiting on it indefinitely.
+					this.forceInterrupt();
+					return;
+				}
+				// Within the delay this is a double-tap, not an escalation: a healthy
+				// run is still unwinding, and forcing here would throw away the tool
+				// results it is about to record. Say so rather than swallowing the
+				// keypress, which is the "Esc does nothing" impression this change is
+				// meant to remove.
+				this.showInterruptPending("still stopping");
+				return;
 			} else if (this.session.isBashRunning) {
 				this.session.abortBash();
 			} else if (this.isBashMode) {
@@ -3172,6 +3212,7 @@ export class InteractiveMode {
 		switch (event.type) {
 			case "agent_start":
 				this.pendingTools.clear();
+				this.interruptRequestedAt = undefined;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -3380,6 +3421,7 @@ export class InteractiveMode {
 				break;
 
 			case "agent_settled":
+				this.interruptRequestedAt = undefined;
 				await this.checkShutdownRequested();
 				break;
 
@@ -4354,6 +4396,61 @@ export class InteractiveMode {
 			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit all queued messages`);
 			this.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
+	}
+
+	/** Tell the user the interrupt was received and how to escalate it. */
+	private showInterruptPending(detail?: string): void {
+		const suffix = detail === undefined ? "" : ` -- ${detail}`;
+		const message = `Interrupting...${suffix} (${keyText("app.interrupt")} again to force stop)`;
+		if (this.activeStatusIndicator?.kind === "working") {
+			this.activeStatusIndicator.setMessage(message);
+		} else {
+			// The working indicator can be hidden by an extension. Arming the force
+			// silently would make the next keypress abandon the run with no warning.
+			this.showStatus(message);
+		}
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Abandon a run that did not stop on the first interrupt.
+	 *
+	 * Used when a provider call, tool, or event handler ignores the abort signal,
+	 * which would otherwise leave the session streaming with no way to interrupt
+	 * it.
+	 */
+	private forceInterrupt(): void {
+		const hadRun = this.agent.signal !== undefined;
+		this.clearStatusIndicator("working");
+		// `isStreaming` stays true through the continuation between runs, where there
+		// is no agent run to abandon but a compaction or summary may still be in
+		// flight -- `abort({force:true})` stops those too, so it is still worth
+		// calling; only the message differs.
+		this.showStatus(
+			hadRun
+				? "Abandoned the run - the model call may still be finishing in the background"
+				: "Stopping the turn that is still finishing",
+		);
+		this.ui.requestRender();
+		// A forced abort discards queued messages and hands them back, so the user's
+		// text lands in the editor instead of disappearing. This covers text queued
+		// between the two interrupts, which the first press never saw.
+		void this.session
+			.abort({ force: true })
+			.then(({ steering, followUp }) => {
+				const queued = [...steering, ...followUp];
+				if (queued.length === 0) {
+					this.updatePendingMessagesDisplay();
+					return;
+				}
+				const combined = [queued.join("\n\n"), this.editor.getText()].filter((text) => text.trim()).join("\n\n");
+				this.editor.setText(combined);
+				this.updatePendingMessagesDisplay();
+				this.ui.requestRender();
+			})
+			.catch((error: unknown) => {
+				this.showError(`Failed to stop the current run: ${error instanceof Error ? error.message : String(error)}`);
+			});
 	}
 
 	private restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
